@@ -30,6 +30,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     // (fermer la connexion invalide le file descriptor donne au C++).
     private var usbConnection: UsbDeviceConnection? = null
 
+    // Drapeaux anti-course : le hub genere plusieurs evenements USB (carte + hub),
+    // ce qui faisait spammer requestPermission et cassait la validation.
+    private var permissionEnCours = false // une demande de permission est en attente
+    private var moteurLance = false       // le flux tourne deja
+
     // --- LE PONT JNI VERS TON MOTEUR C++ ---
     // On passe maintenant le file descriptor USB fourni par Android a libuvc.
     external fun startCamera(fileDescriptor: Int): Boolean
@@ -78,34 +83,30 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     private fun chercherCarteMacroSilicon() {
-        val deviceList = usbManager.deviceList
-        var carteTrouvee = false
+        // Deja en marche : on ignore les evenements USB suivants (le hub en genere plusieurs)
+        if (moteurLance) return
 
-        for (device in deviceList.values) {
-            // On cible ta puce : VID 0x345F et PID 0x2130
-            if (device.vendorId == 0x345F && device.productId == 0x2130) {
-                carteTrouvee = true
-
-                if (usbManager.hasPermission(device)) {
-                    // Permission deja accordee (rebranchement) : on demarre directement
-                    demarrerMoteurVision(device)
-                } else {
-                    val flags = PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                    // L'Intent DOIT etre explicite (setPackage) : sur Android 14+ un PendingIntent
-                    // FLAG_MUTABLE avec un Intent implicite est interdit et fait crasher l'app.
-                    val intent = Intent(ACTION_USB_PERMISSION).setPackage(packageName)
-                    val permissionIntent = PendingIntent.getBroadcast(
-                        this, 0, intent, flags
-                    )
-                    // Demande la permission a l'utilisateur via une popup
-                    usbManager.requestPermission(device, permissionIntent)
-                }
-                break
-            }
+        // On cible ta puce : VID 0x345F et PID 0x2130
+        val device = usbManager.deviceList.values.firstOrNull {
+            it.vendorId == 0x345F && it.productId == 0x2130
         }
 
-        if (!carteTrouvee) {
+        if (device == null) {
             binding.sampleText.text = "Branchez la carte MacroSilicon..."
+            return
+        }
+
+        if (usbManager.hasPermission(device)) {
+            demarrerMoteurVision(device)
+        } else if (!permissionEnCours) {
+            // On ne demande la permission QU'UNE seule fois (sinon le dialogue systeme
+            // redemarre a chaque evenement du hub et la validation echoue).
+            permissionEnCours = true
+            val flags = PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            // Intent explicite (setPackage) : obligatoire sur Android 14+ avec FLAG_MUTABLE.
+            val intent = Intent(ACTION_USB_PERMISSION).setPackage(packageName)
+            val permissionIntent = PendingIntent.getBroadcast(this, 0, intent, flags)
+            usbManager.requestPermission(device, permissionIntent)
         }
     }
 
@@ -115,10 +116,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             when (intent.action) {
                 ACTION_USB_PERMISSION -> {
                     synchronized(this) {
-                        val device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE) as? UsbDevice
-
+                        permissionEnCours = false
                         if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                            device?.let { demarrerMoteurVision(it) }
+                            // On re-cherche l'instance courante de la carte plutot que de se
+                            // fier au device de l'intent (peut etre perime apres le hub).
+                            chercherCarteMacroSilicon()
                         } else {
                             binding.sampleText.text = "Permission refusee."
                         }
@@ -135,6 +137,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun demarrerMoteurVision(device: UsbDevice) {
         // Si un flux tourne deja, on le coupe proprement avant d'en relancer un
         arreterMoteurVision()
+
+        // Securite : on verifie la permission sur CETTE instance juste avant d'ouvrir
+        // (le device de l'intent pouvait etre perime a cause des evenements du hub).
+        if (!usbManager.hasPermission(device)) {
+            chercherCarteMacroSilicon() // relance proprement la demande de permission
+            return
+        }
 
         // Ouverture de la connexion USB -> Android nous donne un file descriptor
         val connection = usbManager.openDevice(device)
@@ -153,11 +162,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.sampleText.text = "Erreur d'ouverture du flux UVC (voir Logcat)."
             arreterMoteurVision()
         } else {
+            moteurLance = true
             binding.sampleText.text = "Flux video en cours de traitement..."
         }
     }
 
     private fun arreterMoteurVision() {
+        moteurLance = false
         stopCamera()          // Stoppe le streaming libuvc cote C++
         usbConnection?.close() // Libere le file descriptor cote Android
         usbConnection = null
