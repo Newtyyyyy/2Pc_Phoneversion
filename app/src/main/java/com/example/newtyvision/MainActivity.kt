@@ -9,6 +9,8 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
@@ -19,6 +21,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.example.newtyvision.databinding.ActivityMainBinding
+import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
@@ -30,10 +33,30 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     // (fermer la connexion invalide le file descriptor donne au C++).
     private var usbConnection: UsbDeviceConnection? = null
 
+    // Sauvegarde persistante des reglages (survit au redemarrage de l'app)
+    private val prefs by lazy { getSharedPreferences("newtyvision_config", MODE_PRIVATE) }
+
+    // Rafraichissement periodique de l'affichage X,Y (toutes les 100 ms)
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val majCible = object : Runnable {
+        override fun run() {
+            val t = getTarget() // [trouvee, X, Y]
+            binding.targetText.text =
+                if (t[0] == 1) "X: ${t[1]}   Y: ${t[2]}" else "X: -   Y: -"
+            uiHandler.postDelayed(this, 100)
+        }
+    }
+
     // Drapeaux anti-course : le hub genere plusieurs evenements USB (carte + hub),
     // ce qui faisait spammer requestPermission et cassait la validation.
     private var permissionEnCours = false // une demande de permission est en attente
     private var moteurLance = false       // le flux tourne deja
+
+    // Liaison MAKCU (souris) + etat de l'aim
+    private lateinit var makcu: MakcuManager
+    @Volatile private var aimActif = false     // l'envoi des mouvements est-il actif ?
+    @Volatile private var envoiEnMarche = true // le thread d'envoi tourne-t-il ?
+    private var gain = 0.30                     // sensibilite : deplacement souris = ecart * gain
 
     // --- LE PONT JNI VERS TON MOTEUR C++ ---
     // On passe maintenant le file descriptor USB fourni par Android a libuvc.
@@ -42,6 +65,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     external fun setSurface(surface: Surface?)
     external fun setHsvRange(hLow: Int, sLow: Int, vLow: Int, hHigh: Int, sHigh: Int, vHigh: Int)
     external fun setClusterDistance(distance: Int)
+    external fun getTarget(): IntArray   // [trouvee(0/1), X, Y]
     external fun stringFromJNI(): String
 
     companion object {
@@ -71,15 +95,66 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.surfaceView.holder.addCallback(this)
 
         configurerReglagesHsv()
+        uiHandler.post(majCible) // demarre l'affichage X,Y
 
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        makcu = MakcuManager(usbManager)
+        configurerAim()
+        demarrerThreadEnvoi()
 
         // On ecoute la popup de permission ET le branchement a chaud de la carte
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
         ContextCompat.registerReceiver(this, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
+        verifierPeripheriques()
+    }
+
+    // Verifie carte de capture ET MAKCU (demande la permission de l'un puis l'autre)
+    private fun verifierPeripheriques() {
         chercherCarteMacroSilicon()
+        chercherMakcu()
+    }
+
+    private fun chercherMakcu() {
+        if (makcu.estConnecte) return
+        val device = makcu.trouver() ?: return
+        if (usbManager.hasPermission(device)) {
+            val ok = makcu.connecter(device)
+            binding.sampleText.text = if (ok) "MAKCU connecte" else "MAKCU : echec connexion"
+        } else if (!permissionEnCours) {
+            permissionEnCours = true
+            val flags = PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            val intent = Intent(ACTION_USB_PERMISSION).setPackage(packageName)
+            usbManager.requestPermission(device, PendingIntent.getBroadcast(this, 0, intent, flags))
+        }
+    }
+
+    // Bouton AIM (active/desactive l'envoi des mouvements) + affichage etat
+    private fun configurerAim() {
+        binding.aimToggle.setOnClickListener {
+            aimActif = !aimActif
+            binding.aimToggle.text = if (aimActif) "AIM : ON" else "AIM : OFF"
+        }
+    }
+
+    // Thread qui envoie les mouvements au MAKCU, uniquement sur une NOUVELLE trame
+    private fun demarrerThreadEnvoi() {
+        thread {
+            var dernierSeq = -1
+            while (envoiEnMarche) {
+                if (aimActif && makcu.estConnecte) {
+                    val t = getTarget() // [trouvee, X, Y, seq]
+                    if (t[0] == 1 && t[3] != dernierSeq) {
+                        dernierSeq = t[3]
+                        val dx = (t[1] * gain).toInt()
+                        val dy = (t[2] * gain).toInt()
+                        if (dx != 0 || dy != 0) makcu.move(dx, dy)
+                    }
+                }
+                try { Thread.sleep(2) } catch (_: InterruptedException) { break }
+            }
+        }
     }
 
     private fun chercherCarteMacroSilicon() {
@@ -118,17 +193,16 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     synchronized(this) {
                         permissionEnCours = false
                         if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                            // On re-cherche l'instance courante de la carte plutot que de se
-                            // fier au device de l'intent (peut etre perime apres le hub).
-                            chercherCarteMacroSilicon()
+                            // On re-verifie les deux peripheriques (carte + MAKCU)
+                            verifierPeripheriques()
                         } else {
                             binding.sampleText.text = "Permission refusee."
                         }
                     }
                 }
-                // Permet de detecter la carte si elle est branchee apres le lancement de l'app
+                // Detecte carte/MAKCU si branches apres le lancement de l'app
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    chercherCarteMacroSilicon()
+                    verifierPeripheriques()
                 }
             }
         }
@@ -176,22 +250,38 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     // --- Reglage HSV en direct (sliders) ---
     private fun configurerReglagesHsv() {
-        // Valeurs initiales par defaut
-        binding.hLow.progress = 133
-        binding.hHigh.progress = 160
-        binding.sLow.progress = 43
-        binding.sHigh.progress = 156
-        binding.vLow.progress = 106
-        binding.vHigh.progress = 206
-        binding.cluster.progress = 10 // rayon de regroupement des clusters
+        // Valeurs chargees depuis la sauvegarde, sinon defauts (magenta/violet, tolerant distance)
+        binding.hLow.progress = prefs.getInt("hLow", 130)
+        binding.hHigh.progress = prefs.getInt("hHigh", 168)
+        binding.sLow.progress = prefs.getInt("sLow", 55)
+        binding.sHigh.progress = prefs.getInt("sHigh", 255)
+        binding.vLow.progress = prefs.getInt("vLow", 75)
+        binding.vHigh.progress = prefs.getInt("vHigh", 255)
+        binding.cluster.progress = prefs.getInt("cluster", 10)
+        binding.gain.progress = prefs.getInt("gain", 30) // 30 -> gain 0.30
 
         val ecouteur = object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) = appliquerHsv()
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         }
-        listOf(binding.cluster, binding.hLow, binding.hHigh, binding.sLow, binding.sHigh, binding.vLow, binding.vHigh)
+        listOf(binding.gain, binding.cluster, binding.hLow, binding.hHigh, binding.sLow, binding.sHigh, binding.vLow, binding.vHigh)
             .forEach { it.setOnSeekBarChangeListener(ecouteur) }
+
+        // Bouton : sauvegarde les valeurs courantes pour le prochain demarrage
+        binding.saveConfig.setOnClickListener {
+            prefs.edit()
+                .putInt("hLow", binding.hLow.progress)
+                .putInt("hHigh", binding.hHigh.progress)
+                .putInt("sLow", binding.sLow.progress)
+                .putInt("sHigh", binding.sHigh.progress)
+                .putInt("vLow", binding.vLow.progress)
+                .putInt("vHigh", binding.vHigh.progress)
+                .putInt("cluster", binding.cluster.progress)
+                .putInt("gain", binding.gain.progress)
+                .apply()
+            binding.sampleText.text = "Config sauvegardee ✓"
+        }
 
         // Toucher la video affiche/masque le panneau de reglage
         binding.surfaceView.setOnClickListener {
@@ -208,6 +298,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.hHigh.progress, binding.sHigh.progress, binding.vHigh.progress
         )
         setClusterDistance(binding.cluster.progress)
+        gain = binding.gain.progress / 100.0
+        binding.tGain.text = "Gain : %.2f".format(gain)
         binding.tCluster.text = "Distance clusters : ${binding.cluster.progress}"
         binding.tHLow.text = "Teinte bas : ${binding.hLow.progress}"
         binding.tHHigh.text = "Teinte haut : ${binding.hHigh.progress}"
@@ -232,7 +324,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         super.onDestroy()
+        envoiEnMarche = false // stoppe le thread d'envoi
+        uiHandler.removeCallbacks(majCible)
         arreterMoteurVision()
+        makcu.fermer()
         unregisterReceiver(usbReceiver)
     }
 }

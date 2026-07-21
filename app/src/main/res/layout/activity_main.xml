@@ -12,6 +12,7 @@
         android:id="@+id/surface_view"
         android:layout_width="0dp"
         android:layout_height="0dp"
+        app:layout_constraintDimensionRatio="16:9"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -29,6 +30,30 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- Ecart X,Y de la cible (centre plus grosse box vs centre ecran) -->
+    <TextView
+        android:id="@+id/target_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="#80000000"
+        android:padding="10dp"
+        android:text="X: -  Y: -"
+        android:textColor="#00FF00"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Bouton d'activation de l'aim (envoi des mouvements au MAKCU) -->
+    <Button
+        android:id="@+id/aim_toggle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="12dp"
+        android:text="AIM : OFF"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
     <!-- Panneau de reglage HSV (affiche/masque en touchant l'ecran) -->
     <LinearLayout
         android:id="@+id/tuning_panel"
@@ -40,6 +65,24 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent">
+
+        <Button
+            android:id="@+id/save_config"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Sauvegarder la config" />
+
+        <TextView
+            android:id="@+id/t_gain"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@android:color/white"
+            android:text="Gain (sensibilite)" />
+        <SeekBar
+            android:id="@+id/gain"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="200" />
 
         <TextView
             android:id="@+id/t_cluster"
