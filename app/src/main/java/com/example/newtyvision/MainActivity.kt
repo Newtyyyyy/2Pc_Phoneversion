@@ -183,9 +183,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         // Deja en marche : on ignore les evenements USB suivants (le hub en genere plusieurs)
         if (moteurLance) return
 
-        // On cible ta puce : VID 0x345F et PID 0x2130
+        // VID/PID de la carte lus depuis config/device.properties (via BuildConfig).
         val device = usbManager.deviceList.values.firstOrNull {
-            it.vendorId == 0x345F && it.productId == 0x2130
+            it.vendorId == BuildConfig.CARD_VID && it.productId == BuildConfig.CARD_PID
         }
 
         if (device == null) {

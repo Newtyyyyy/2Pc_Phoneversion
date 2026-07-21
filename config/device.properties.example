@@ -1,0 +1,14 @@
+# MODELE a copier en "device.properties" (meme dossier), puis mettre tes vrais VID/PID.
+# device.properties reste LOCAL (ignore par git) ; ce fichier .example est versionne.
+#
+# Trouver les VID/PID : "adb shell dumpsys usb" ou l'appli, en hexa (ex : 0x1A86).
+# Sans device.properties, la detection utilise 0x0000 (aucun appareil) : l'app compile
+# mais ne reconnaitra rien tant que tu n'as pas cree ton device.properties.
+
+# Carte de capture UVC (HDMI -> USB)
+card.vendorId=0x0000
+card.productId=0x0000
+
+# MAKCU (emulateur souris/clavier serie)
+makcu.vendorId=0x0000
+makcu.productId=0x0000

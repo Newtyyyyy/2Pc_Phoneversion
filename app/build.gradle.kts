@@ -1,6 +1,16 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
 }
+
+// Identifiants materiels sortis du code : lus depuis config/device.properties
+// (fichier LOCAL, ignore par git). Repli 0x0000 si absent (voir device.properties.example).
+val deviceProps = Properties().apply {
+    val f = rootProject.file("config/device.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun devId(cle: String): String = deviceProps.getProperty(cle, "0x0000")
 
 android {
     namespace = "com.example.newtyvision"
@@ -24,6 +34,12 @@ android {
             // Ajoute "armeabi-v7a" si tu vises de vieux appareils 32 bits.
             abiFilters += "arm64-v8a"
         }
+
+        // VID/PID injectes depuis config/device.properties (non versionne).
+        buildConfigField("int", "CARD_VID", devId("card.vendorId"))
+        buildConfigField("int", "CARD_PID", devId("card.productId"))
+        buildConfigField("int", "MAKCU_VID", devId("makcu.vendorId"))
+        buildConfigField("int", "MAKCU_PID", devId("makcu.productId"))
     }
 
     buildTypes {
@@ -45,6 +61,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 }
 

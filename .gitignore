@@ -13,3 +13,10 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Identifiants materiels (VID/PID, series...) : LOCAL, jamais versionne.
+/config/device.properties
+
+# IDE JetBrains : peut contenir le numero de serie de l'appareil deploye, des
+# chemins machine, etc. On ne versionne pas le dossier .idea.
+/.idea/

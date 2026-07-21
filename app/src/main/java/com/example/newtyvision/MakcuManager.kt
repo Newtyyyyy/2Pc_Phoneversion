@@ -8,7 +8,8 @@ import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 
 /**
- * Liaison serie vers le MAKCU (emulateur de souris, puce CH343, VID:PID 1A86:55D3).
+ * Liaison serie vers le MAKCU (emulateur de souris). VID/PID lus depuis BuildConfig
+ * (config/device.properties, non versionne).
  *
  * Protocole (doc officielle makcu-docs) :
  *  - Deplacement relatif : texte "km.move(dx,dy)\r\n"  (dx,dy dans -32767..32767)
@@ -17,8 +18,9 @@ import com.hoho.android.usbserial.driver.UsbSerialProber
 class MakcuManager(private val usbManager: UsbManager) {
 
     companion object {
-        const val VID = 0x1A86
-        const val PID = 0x55D3
+        // VID/PID lus depuis config/device.properties (via BuildConfig, non versionne).
+        val VID = BuildConfig.MAKCU_VID
+        val PID = BuildConfig.MAKCU_PID
         private const val TAG = "NewtyVision_MAKCU"
         private const val BAUD_HIGH = 4_000_000
         private const val BAUD_LOW = 115_200

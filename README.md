@@ -1,8 +1,11 @@
 # NewtyVision
 
 Application Android qui capture en direct le flux d'une **carte d'acquisition HDMI→USB**
-(puce MacroSilicon, VID `0x345F` / PID `0x2130`) et le traite en temps réel avec **OpenCV**
-côté natif (C++), via **libuvc**.
+et le traite en temps réel avec **OpenCV** côté natif (C++), via **libuvc**.
+
+> Les VID/PID de ta carte de capture et du MAKCU se configurent dans
+> `config/device.properties` (copie de `config/device.properties.example`).
+> Ce fichier reste **local** (ignoré par git) pour ne pas exposer ton matériel.
 
 L'image est affichée en plein écran avec un effet *color-splash* : tout passe en niveaux de
 gris **sauf** les pixels dans une plage de couleur HSV réglable, et chaque groupe de pixels
