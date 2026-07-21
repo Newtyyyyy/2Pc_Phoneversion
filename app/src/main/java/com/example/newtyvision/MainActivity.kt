@@ -138,19 +138,41 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
-    // Thread qui envoie les mouvements au MAKCU, uniquement sur une NOUVELLE trame
+    // --- Reglages courbe humaine (Bezier maison) ---
+    private val ZONE_MORTE = 1.0   // en counts : en dessous, cible atteinte, on ne bouge plus
+    private val PAS_MS = 5L        // cadence entre 2 sous-pas de la courbe (ms) -> vitesse du flick
+    private val bezier = BezierAim()
+
+    // Thread d'envoi : joue une COURBE de Bezier vers la cible, sous-pas par sous-pas.
+    // Tant qu'une courbe est en cours, on l'envoie jusqu'au bout (vrai "flick"), puis on
+    // re-planifie vers la cible courante. Les micro-ajustements deviennent de petites courbes.
     private fun demarrerThreadEnvoi() {
         thread {
-            var dernierSeq = -1
+            var trajet: List<IntArray> = emptyList()
+            var idx = 0
             while (envoiEnMarche) {
                 if (aimActif && makcu.estConnecte) {
-                    val t = getTarget() // [trouvee, X, Y, seq]
-                    if (t[0] == 1 && t[3] != dernierSeq) {
-                        dernierSeq = t[3]
-                        val dx = (t[1] * gain).toInt()
-                        val dy = (t[2] * gain).toInt()
-                        if (dx != 0 || dy != 0) makcu.move(dx, dy)
+                    if (idx < trajet.size) {
+                        // Courbe en cours : on envoie le prochain sous-pas.
+                        val p = trajet[idx++]
+                        makcu.move(p[0], p[1])
+                        try { Thread.sleep(PAS_MS) } catch (_: InterruptedException) { break }
+                        continue
                     }
+                    // Courbe finie : on planifie vers la cible courante (echelle = gain).
+                    val t = getTarget() // [trouvee, X, Y, seq]
+                    if (t[0] == 1) {
+                        val gx = Math.round(t[1] * gain).toInt()
+                        val gy = Math.round(t[2] * gain).toInt()
+                        if (Math.hypot(gx.toDouble(), gy.toDouble()) > ZONE_MORTE) {
+                            trajet = bezier.trajet(gx, gy)
+                            idx = 0
+                            continue
+                        }
+                    }
+                } else {
+                    trajet = emptyList()
+                    idx = 0
                 }
                 try { Thread.sleep(2) } catch (_: InterruptedException) { break }
             }
