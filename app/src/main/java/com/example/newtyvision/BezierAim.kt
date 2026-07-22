@@ -21,8 +21,9 @@ class BezierAim(private val rnd: Random = Random()) {
 
     // --- Reglages (modifiables en direct) ---
     var arc = 0.18        // amplitude de l'arc (fraction de la distance ; 0 = ligne droite)
-    var jitter = 1.2      // amplitude du micro-tremblement (counts souris)
-    var overshoot = 0.06  // depassement puis retour (fraction ; 0 = aucun)
+    // Amplitudes ABSOLUES (counts), fixees par l'appelant selon la taille de la box (max 5%).
+    var jitter = 0.4          // amplitude crete-a-crete du tremblement
+    var overshootCounts = 0.0 // depassement absolu puis recalage
     var pasParUnite = 0.6 // densite de sous-pas (plus grand = courbe plus fine)
     var pasMin = 6
     var pasMax = 40
@@ -50,9 +51,11 @@ class BezierAim(private val rnd: Random = Random()) {
         val p2x = ex * h2 + perpX * a * 0.6
         val p2y = ey * h2 + perpY * a * 0.6
 
-        // Point d'arrivee de la courbe = cible + overshoot ; on corrige a la fin.
-        val cx = ex * (1.0 + overshoot)
-        val cy = ey * (1.0 + overshoot)
+        // Point d'arrivee = cible + depassement ABSOLU (counts) dans la direction ; corrige a la fin.
+        val ux = ex / dist
+        val uy = ey / dist
+        val cx = ex + ux * overshootCounts
+        val cy = ey + uy * overshootCounts
 
         val sortie = ArrayList<IntArray>(n + 1)
         var prevIx = 0

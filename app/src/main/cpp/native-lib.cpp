@@ -2,6 +2,8 @@
 #include <string>
 #include <mutex>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <opencv2/opencv.hpp>
 #include <android/log.h>
 #include <android/native_window.h>
@@ -24,8 +26,8 @@ static uvc_device_handle_t*  uvcHandle    = nullptr;
 // Modifiables en direct depuis Kotlin via setHsvRange(). Proteges par un mutex car
 // lus par le thread libuvc et ecrits par le thread UI.
 static std::mutex hsvMutex;
-static Scalar HSV_LOW (130,  55,  75); // contour violet/magenta (chams), tolerant a la distance
-static Scalar HSV_HIGH(168, 255, 255);
+static Scalar HSV_LOW (140, 120, 180); // valeurs PC (flux YUYV non-compresse = couleurs propres)
+static Scalar HSV_HIGH(160, 200, 255);
 
 // Rayon de regroupement des clusters (0 = pixels colles seulement, plus grand = fusion large)
 static std::atomic<int> clusterRadius{10};
@@ -36,6 +38,27 @@ static std::atomic<int>  targetX{0};
 static std::atomic<int>  targetY{0};
 static std::atomic<bool> targetFound{false};
 static std::atomic<int>  frameSeq{0}; // incremente a chaque trame traitee
+static std::atomic<int>  boxW{0};     // taille de la box cible (px du crop)
+static std::atomic<int>  boxH{0};
+static std::atomic<int>  centreH{0};  // HSV moyen au centre du viseur (pour la pipette)
+static std::atomic<int>  centreS{0};
+static std::atomic<int>  centreV{0};
+
+static long long nowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Reglages de suivi (modifiables en direct depuis Kotlin)
+static std::atomic<int> aimOffsetX{0};   // decalage du point de consigne en X (px du crop)
+static std::atomic<int> aimOffsetY{0};   // decalage du point de consigne en Y (px du crop)
+static std::atomic<int> lissagePct{60};  // 0..100 : lissage EMA (100 = brut, bas = tres lisse)
+static std::atomic<int> headBandPct{22}; // % du haut de la silhouette pris pour viser la "tete"
+static std::atomic<int> stabilitePct{70};// (inutilise dans la version simple)
+static std::atomic<int> minPixels{30};   // aire mini d'un blob pour etre une cible (anti-parasites)
+static std::atomic<int> predictionMs{60};// avance de prediction (ms) pour compenser la latence
+static std::atomic<int> cropPctX{28};    // % de largeur detectee (zone horizontale)
+static std::atomic<int> cropPctY{16};    // % de hauteur detectee (zone verticale)
 
 // Surface d'affichage (protegee : posee depuis l'UI, utilisee depuis le thread libuvc)
 static ANativeWindow*        nativeWindow = nullptr;
@@ -76,6 +99,37 @@ static void afficherSurSurface(const Mat& rgba) {
 }
 
 // ==========================================
+// FILTRE ONE EURO : lissage adaptatif (fort au repos = zero tremblement ; faible en
+// mouvement rapide = zero lag). Standard pour le tracking de pointeur. Donne aussi la
+// vitesse lissee (pour predire et compenser la latence).
+// ==========================================
+struct LowPass {
+    double s = 0; bool init = false;
+    double filter(double x, double a) {
+        if (!init) { s = x; init = true; } else { s = a * x + (1.0 - a) * s; }
+        return s;
+    }
+    void reset() { init = false; }
+};
+struct OneEuro {
+    double mincutoff = 1.0, beta = 0.02, dcutoff = 1.0;
+    LowPass xf, dxf; double xPrev = 0; bool init = false; double vel = 0;
+    static double alpha(double cutoff, double dt) {
+        double tau = 1.0 / (2.0 * CV_PI * cutoff);
+        return 1.0 / (1.0 + tau / dt);
+    }
+    double filter(double x, double dt) {
+        double dx = init ? (x - xPrev) / dt : 0.0;
+        vel = dxf.filter(dx, alpha(dcutoff, dt));            // vitesse lissee (px/s)
+        double cutoff = mincutoff + beta * std::fabs(vel);
+        double fx = xf.filter(x, alpha(cutoff, dt));
+        xPrev = x; init = true;
+        return fx;
+    }
+    void reset() { xf.reset(); dxf.reset(); init = false; vel = 0; }
+};
+
+// ==========================================
 // CALLBACK : appele par libuvc a chaque trame recue (sur son propre thread)
 // ==========================================
 static void frameCallback(uvc_frame_t* frame, void* /*userPtr*/) {
@@ -92,7 +146,14 @@ static void frameCallback(uvc_frame_t* frame, void* /*userPtr*/) {
         Mat jpeg(1, static_cast<int>(frame->data_bytes), CV_8UC1, frame->data);
         frameBrute = imdecode(jpeg, IMREAD_COLOR);
     } else if (frame->frame_format == UVC_FRAME_FORMAT_YUYV) {
-        // Flux non compresse YUY2 : conversion directe vers BGR
+        // Flux non compresse YUY2 : conversion directe vers BGR.
+        // GARDE-FOU : sous forte charge (640x480@60 en USB2) la carte envoie des trames
+        // TRONQUEES -> sans ce controle, cvtColor lit hors memoire et crashe (SIGSEGV).
+        size_t attendu = (size_t) frame->width * frame->height * 2;
+        if (frame->data_bytes < attendu) {
+            LOGE("trame YUYV tronquee (%zu < %zu) -> ignoree", frame->data_bytes, attendu);
+            return;
+        }
         Mat yuyv(frame->height, frame->width, CV_8UC2, frame->data);
         cvtColor(yuyv, frameBrute, COLOR_YUV2BGR_YUYV);
     } else {
@@ -105,9 +166,11 @@ static void frameCallback(uvc_frame_t* frame, void* /*userPtr*/) {
         return;
     }
 
-    // --- CROP CENTRAL FIXE : 10% de la largeur et de la hauteur, centre ---
-    int cw = std::max(16, frameBrute.cols * 10 / 100);
-    int ch = std::max(16, frameBrute.rows * 10 / 100);
+    // --- CROP CENTRAL REGLABLE : % de largeur (Zone X) et % de hauteur (Zone Y) ---
+    int cw = std::max(16, frameBrute.cols * cropPctX.load() / 100);
+    int ch = std::max(16, frameBrute.rows * cropPctY.load() / 100);
+    if (cw > frameBrute.cols) cw = frameBrute.cols;
+    if (ch > frameBrute.rows) ch = frameBrute.rows;
     Rect crop((frameBrute.cols - cw) / 2, (frameBrute.rows - ch) / 2, cw, ch);
     Mat roiBGR = frameBrute(crop); // vue, sans copie
 
@@ -154,73 +217,109 @@ static void frameCallback(uvc_frame_t* frame, void* /*userPtr*/) {
     contours.clear();
     findContours(*source, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
-    // Collecte des boites de clusters valides
+    // Collecte des blobs au-dessus du SEUIL DE PIXELS (anti-parasites reglable).
     Rect limites(0, 0, resultat.cols, resultat.rows);
     static std::vector<Rect> boites;
     boites.clear();
+    int seuilPix = minPixels.load();
     for (auto& c : contours) {
-        if (contourArea(c) < 15.0) continue; // anti-bruit (zone petite -> seuil bas)
         Rect boite = boundingRect(c);
         if (r > 0) {
+            // On retire le rayon de dilatation pour retrouver la box reelle du blob.
             boite.x += r; boite.y += r;
             boite.width -= 2 * r; boite.height -= 2 * r;
         }
         boite &= limites;
-        if (boite.width > 2 && boite.height > 2) {
-            boites.push_back(boite);
-            rectangle(resultat, boite, Scalar(0, 255, 0, 255), 2); // clusters : vert fin
-        }
+        if (boite.width <= 1 || boite.height <= 1) continue;
+        // Anti-parasites FIABLE : on compte les VRAIS pixels colores (masque d'origine)
+        // dans la box, pas l'aire du contour DILATE. Sans ca, un blob de 3 px dilate
+        // par le regroupement de clusters gonfle et passe le seuil a tort.
+        if (countNonZero(mask(boite)) < seuilPix) continue; // ex : 3 px -> ignore
+        boites.push_back(boite);
+        rectangle(resultat, boite, Scalar(0, 255, 0, 255), 1); // blobs valides : vert fin
     }
 
-    // 5. Cible = milieu du BORD SUPERIEUR de la box.
-    // Critere : la plus proche du viseur (plus petit deplacement). Hysteresis : on
-    // reste colle a la cible precedente tant qu'une box reste proche de sa derniere
-    // position -> evite de sauter de cible quand les ombres bougent.
+    // 5. Cible = le blob valide le plus PROCHE DU VISEUR. Point vise = haut de la box
+    //    (un peu descendu = tete) + Offset Y. Lissage EMA simple. Simple et efficace.
     Point centreEcran(resultat.cols / 2, resultat.rows / 2);
-    static Point derniereCible;
-    static bool  avaitCible = false;
-    const double STICK2 = 22.0 * 22.0; // rayon de "collage" au carre (px)
+    static float lisseX = 0, lisseY = 0;
+    static bool  lisseInit = false;
 
-    auto sommet = [](const Rect& b) { return Point(b.x + b.width / 2, b.y); };
-    auto dist2  = [](Point a, Point b) {
-        int dx = a.x - b.x, dy = a.y - b.y; return double(dx * dx + dy * dy);
+    auto pointTete = [](const Rect& b) {
+        return Point(b.x + b.width / 2, b.y + b.height / 8); // haut-centre, ~tete
     };
 
     int choisi = -1;
     double best = 1e18;
-    if (avaitCible) { // priorite a la continuite (meme cible qu'avant)
-        for (size_t i = 0; i < boites.size(); ++i) {
-            double d = dist2(sommet(boites[i]), derniereCible);
-            if (d < best) { best = d; choisi = static_cast<int>(i); }
-        }
-        if (best > STICK2) choisi = -1; // trop loin -> on relache
-    }
-    if (choisi < 0) { // sinon : la plus proche du viseur
-        best = 1e18;
-        for (size_t i = 0; i < boites.size(); ++i) {
-            double d = dist2(sommet(boites[i]), centreEcran);
-            if (d < best) { best = d; choisi = static_cast<int>(i); }
-        }
+    for (size_t i = 0; i < boites.size(); ++i) {
+        Point p = pointTete(boites[i]);
+        int dx = p.x - centreEcran.x, dy = p.y - centreEcran.y;
+        double d = (double) dx * dx + (double) dy * dy;
+        if (d < best) { best = d; choisi = static_cast<int>(i); }
     }
 
     if (choisi >= 0) {
         Rect b = boites[choisi];
-        Point cible = sommet(b);
-        targetX.store(cible.x - centreEcran.x);   // + = cible a droite
-        targetY.store(cible.y - centreEcran.y);   // + = cible en bas
-        targetFound.store(true);
-        derniereCible = cible; avaitCible = true;
+        Point cible = pointTete(b);
 
+        // Lissage EMA simple (slider Lissage : bas = tres lisse, haut = brut/reactif).
+        float a = 0.08f + (lissagePct.load() / 100.0f) * 0.90f; // 0.08..0.98
+        if (!lisseInit) { lisseX = cible.x; lisseY = cible.y; lisseInit = true; }
+        else { lisseX = a * cible.x + (1 - a) * lisseX; lisseY = a * cible.y + (1 - a) * lisseY; }
+
+        Point visee(cvRound(lisseX) + aimOffsetX.load(),
+                    cvRound(lisseY) + aimOffsetY.load());
+        double ox = visee.x - centreEcran.x; // offset actuel (px)
+        double oy = visee.y - centreEcran.y;
+
+        // --- PREDICTION anti-latence : on estime la vitesse de la cible et on vise ou
+        // elle SERA dans "prediction" ms -> compense le delai telephone<->PC + traitement.
+        static double prevOX = 0, prevOY = 0, velOX = 0, velOY = 0;
+        static long long prevT = 0; static bool hasPrev = false;
+        long long now = nowMs();
+        if (hasPrev) {
+            double dt = (double) (now - prevT); // ms
+            if (dt > 1.0 && dt < 300.0) {
+                double vx = (ox - prevOX) / dt, vy = (oy - prevOY) / dt; // px/ms
+                velOX = 0.4 * vx + 0.6 * velOX; // vitesse lissee
+                velOY = 0.4 * vy + 0.6 * velOY;
+            }
+        }
+        prevOX = ox; prevOY = oy; prevT = now; hasPrev = true;
+        double lead = (double) predictionMs.load();
+        int px = (int) lround(ox + velOX * lead);
+        int py = (int) lround(oy + velOY * lead);
+
+        targetX.store(px);
+        targetY.store(py);
+        targetFound.store(true);
+
+        Point viseePred(px + centreEcran.x, py + centreEcran.y);
         rectangle(resultat, b, Scalar(255, 255, 0, 255), 2);            // cible : jaune
-        line(resultat, b.tl(), Point(b.x + b.width, b.y), Scalar(0, 0, 255, 255), 2); // bord haut rouge
-        circle(resultat, cible, 3, Scalar(255, 255, 0, 255), -1);       // point vise
-        line(resultat, centreEcran, cible, Scalar(0, 255, 255, 255), 1);// ecran -> cible
+        circle(resultat, visee, 3, Scalar(255, 0, 255, 255), -1);       // point mesure (magenta)
+        circle(resultat, viseePred, 3, Scalar(0, 255, 0, 255), -1);     // point PREDIT (vert)
+        line(resultat, centreEcran, viseePred, Scalar(0, 255, 255, 255), 1);
     } else {
         targetFound.store(false);
-        avaitCible = false;
+        lisseInit = false;
     }
 
     frameSeq.fetch_add(1); // nouvelle trame traitee (pour l'envoi serie a la bonne cadence)
+
+    // --- PIPETTE : HSV moyen d'un petit carre au centre du viseur (aide au reglage) ---
+    {
+        int cx = hsv.cols / 2, cy = hsv.rows / 2, rr = 3;
+        Rect c = Rect(cx - rr, cy - rr, 2 * rr + 1, 2 * rr + 1) & Rect(0, 0, hsv.cols, hsv.rows);
+        if (c.width > 0 && c.height > 0) {
+            Scalar m = mean(hsv(c));
+            centreH.store((int)m[0]); centreS.store((int)m[1]); centreV.store((int)m[2]);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "H%d S%d V%d", (int)m[0], (int)m[1], (int)m[2]);
+            putText(resultat, buf, Point(2, 12), FONT_HERSHEY_SIMPLEX, 0.4,
+                    Scalar(0, 255, 255, 255), 1);
+            rectangle(resultat, c, Scalar(255, 255, 255, 255), 1); // ou on echantillonne
+        }
+    }
 
     // 6. Affichage (l'image garde son ratio 16:9 ; la SurfaceView est letterboxee)
     afficherSurSurface(resultat);
@@ -258,16 +357,19 @@ static void listerFormats() {
 // ==========================================
 static bool negocierFormat(uvc_stream_ctrl_t* ctrl) {
     struct Essai { uvc_frame_format fmt; int w; int h; int fps; const char* nom; };
-    // On PRIVILEGIE le 720p60 : 60 fps (plafond de la carte) + decodage 2x plus leger
-    // que le 1080p. La carte ne depasse jamais 60 fps.
+    // PRIORITE : NON-COMPRESSE (YUYV) 720p60 -> couleur PROPRE + 60 fps, ideal detection.
+    // Possible uniquement en USB3 (la bande passante YUYV60 ne passe pas en USB2 -> trames
+    // tronquees). Repli MJPEG 60 fps si on est en USB2 (couleur sale mais fluide).
+    // La carte (MS2130) ne depasse jamais 60 fps.
     const Essai essais[] = {
+            // USB3 : couleur propre + fluide (le graal pour la detection HSV)
+            { UVC_FRAME_FORMAT_YUYV,  1280,  720, 60, "YUYV 720p60 (non-compresse)"  },
+            { UVC_FRAME_FORMAT_YUYV,  1920, 1080, 60, "YUYV 1080p60 (non-compresse)" },
+            { UVC_FRAME_FORMAT_YUYV,  1280,  720, 30, "YUYV 720p30 (non-compresse)"  },
+            // Repli USB2 : MJPEG compresse mais 60 fps
             { UVC_FRAME_FORMAT_MJPEG, 1280,  720, 60, "MJPEG 720p60"  },
-            { UVC_FRAME_FORMAT_MJPEG, 1024,  768, 60, "MJPEG 1024x768@60" },
-            { UVC_FRAME_FORMAT_MJPEG,  640,  480, 60, "MJPEG 640x480@60"  },
-            { UVC_FRAME_FORMAT_MJPEG, 1280,  720, 30, "MJPEG 720p30"  },
-            { UVC_FRAME_FORMAT_MJPEG, 1920, 1080, 60, "MJPEG 1080p60" },
             { UVC_FRAME_FORMAT_MJPEG, 1920, 1080, 30, "MJPEG 1080p30" },
-            { UVC_FRAME_FORMAT_YUYV,   640,  480, 60, "YUYV 640x480@60" },
+            { UVC_FRAME_FORMAT_YUYV,  1280,  720, 15, "YUYV 720p15 (repli USB2)" },
     };
 
     for (const auto& e : essais) {
@@ -392,12 +494,86 @@ Java_com_example_newtyvision_MainActivity_setClusterDistance(
     clusterRadius.store(distance);
 }
 
-// Renvoie [trouvee(0/1), X, Y, seq] : ecart en pixels du crop + numero de trame
+// Decalage du point de consigne (px du crop). Y positif = plus bas, negatif = plus haut.
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_newtyvision_MainActivity_setAimOffset(
+        JNIEnv* /*env*/, jobject /*this*/, jint x, jint y) {
+    aimOffsetX.store(x);
+    aimOffsetY.store(y);
+}
+
+// Lissage EMA de la consigne : 0 = tres lisse (memoire longue), 100 = brut (aucun lissage).
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_newtyvision_MainActivity_setLissage(
+        JNIEnv* /*env*/, jobject /*this*/, jint pct) {
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    lissagePct.store(pct);
+}
+
+// Hauteur de la bande "tete" (% du haut de la silhouette moyenne pour viser). 5..50 conseille.
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_newtyvision_MainActivity_setHeadBand(
+        JNIEnv* /*env*/, jobject /*this*/, jint pct) {
+    if (pct < 1) pct = 1;
+    if (pct > 100) pct = 100;
+    headBandPct.store(pct);
+}
+
+// Stabilite du boxing (inutilise dans la version simple, conserve pour compat).
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_newtyvision_MainActivity_setStabilite(
+        JNIEnv* /*env*/, jobject /*this*/, jint pct) {
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    stabilitePct.store(pct);
+}
+
+// Seuil minimum de pixels d'un blob pour etre considere comme cible (anti-parasites).
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_newtyvision_MainActivity_setMinPixels(
+        JNIEnv* /*env*/, jobject /*this*/, jint px) {
+    if (px < 0) px = 0;
+    minPixels.store(px);
+}
+
+// Avance de prediction en ms (compense la latence : on vise ou la cible sera).
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_newtyvision_MainActivity_setPrediction(
+        JNIEnv* /*env*/, jobject /*this*/, jint ms) {
+    if (ms < 0) ms = 0;
+    if (ms > 300) ms = 300;
+    predictionMs.store(ms);
+}
+
+// Taille de la zone detectee (% de largeur et de hauteur de l'image, centree).
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_newtyvision_MainActivity_setZoneSize(
+        JNIEnv* /*env*/, jobject /*this*/, jint pctX, jint pctY) {
+    if (pctX < 3) pctX = 3; if (pctX > 100) pctX = 100;
+    if (pctY < 3) pctY = 3; if (pctY > 100) pctY = 100;
+    cropPctX.store(pctX);
+    cropPctY.store(pctY);
+}
+
+// Pipette : renvoie le HSV moyen au centre du viseur [H, S, V].
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_example_newtyvision_MainActivity_getCenterHsv(JNIEnv* env, jobject /*this*/) {
+    jint v[3] = { centreH.load(), centreS.load(), centreV.load() };
+    jintArray a = env->NewIntArray(3);
+    env->SetIntArrayRegion(a, 0, 3, v);
+    return a;
+}
+
+// Renvoie [trouvee(0/1), X, Y, seq, boxW, boxH] : ecart px (detection HSV) + numero de
+// trame + taille de la box cible. Lu par Kotlin pour l'affichage et l'envoi au MAKCU.
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_example_newtyvision_MainActivity_getTarget(JNIEnv* env, jobject /*this*/) {
-    jint vals[4] = { targetFound.load() ? 1 : 0, targetX.load(), targetY.load(), frameSeq.load() };
-    jintArray arr = env->NewIntArray(4);
-    env->SetIntArrayRegion(arr, 0, 4, vals);
+    jint vals[6];
+    vals[0] = targetFound.load() ? 1 : 0; vals[1] = targetX.load(); vals[2] = targetY.load();
+    vals[3] = frameSeq.load(); vals[4] = boxW.load(); vals[5] = boxH.load();
+    jintArray arr = env->NewIntArray(6);
+    env->SetIntArrayRegion(arr, 0, 6, vals);
     return arr;
 }
 

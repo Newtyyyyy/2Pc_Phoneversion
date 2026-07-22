@@ -54,17 +54,37 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Panneau de reglage HSV (affiche/masque en touchant l'ecran) -->
-    <LinearLayout
+    <!-- Gachette : si active, on ne vise que clic droit maintenu -->
+    <Button
+        android:id="@+id/gachette_toggle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="12dp"
+        android:text="Gachette : OFF"
+        app:layout_constraintBottom_toTopOf="@id/aim_toggle"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Panneau de reglage (defilable ; affiche/masque en touchant l'ecran) -->
+    <ScrollView
         android:id="@+id/tuning_panel"
         android:layout_width="320dp"
-        android:layout_height="wrap_content"
+        android:layout_height="0dp"
         android:background="#B0000000"
-        android:orientation="vertical"
-        android:padding="12dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <Button
+            android:id="@+id/pipette"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="PIPETTE (viser la cible)" />
 
         <Button
             android:id="@+id/save_config"
@@ -73,16 +93,112 @@
             android:text="Sauvegarder la config" />
 
         <TextView
-            android:id="@+id/t_gain"
+            android:id="@+id/t_vitesse_x"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="@android:color/white"
-            android:text="Gain (sensibilite)" />
+            android:textColor="#66FF66"
+            android:text="Vitesse X" />
         <SeekBar
-            android:id="@+id/gain"
+            android:id="@+id/vitesse_x"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:max="200" />
+            android:max="100" />
+
+        <TextView
+            android:id="@+id/t_vitesse_y"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#66FF66"
+            android:text="Vitesse Y" />
+        <SeekBar
+            android:id="@+id/vitesse_y"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100" />
+
+        <TextView
+            android:id="@+id/t_expo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#AAFF00"
+            android:text="Expo (loin=rapide)" />
+        <SeekBar
+            android:id="@+id/expo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100" />
+
+        <TextView
+            android:id="@+id/t_lissage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#66E0FF"
+            android:text="Lissage" />
+        <SeekBar
+            android:id="@+id/lissage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100" />
+
+        <TextView
+            android:id="@+id/t_prediction"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#00FF88"
+            android:text="Prediction" />
+        <SeekBar
+            android:id="@+id/prediction"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="300" />
+
+        <TextView
+            android:id="@+id/t_zone_x"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FFD24D"
+            android:text="Zone X" />
+        <SeekBar
+            android:id="@+id/zone_x"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100" />
+
+        <TextView
+            android:id="@+id/t_zone_y"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FFD24D"
+            android:text="Zone Y" />
+        <SeekBar
+            android:id="@+id/zone_y"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100" />
+
+        <TextView
+            android:id="@+id/t_min_pixels"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FFCC44"
+            android:text="Min pixels" />
+        <SeekBar
+            android:id="@+id/min_pixels"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="500" />
+
+        <TextView
+            android:id="@+id/t_offset_y"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FF66FF"
+            android:text="Offset Y" />
+        <SeekBar
+            android:id="@+id/offset_y"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="72" />
 
         <TextView
             android:id="@+id/t_cluster"
@@ -169,5 +285,6 @@
             android:max="255" />
 
     </LinearLayout>
+    </ScrollView>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
